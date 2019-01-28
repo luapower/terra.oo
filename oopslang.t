@@ -7,6 +7,7 @@
 
 if not ... then require'oopslang_test'; return end
 
+--local checkreturns = require'oopslang_checkreturns'
 setfenv(1, require'low')
 
 local oopslang = {
@@ -41,6 +42,11 @@ function lang:compile_field(cls, f, env)
 	add(cls.T.entries, {field = f.name, type = f.type_expr(env)})
 end
 
+local function checkreturns(body_quote, arg_syms)
+	local terra helper([arg_syms]) body_quote end
+	return helper:gettype().returntype
+end
+
 function lang:compile_method(cls, m, env)
 	local fenv = setmetatable({}, {__index = env})
 	local self_sym = symbol(&cls.T, 'self')
@@ -52,8 +58,10 @@ function lang:compile_method(cls, m, env)
 		add(arg_syms, arg_sym)
 		fenv[arg.name] = arg_sym
 	end
-	local ret_type = m.returntype_expr and m.returntype_expr(env) or {}
 	local body_quote = m.body_stmts(fenv)
+	local ret_type = m.returntype_expr
+		and m.returntype_expr(env)
+		or checkreturns(body_quote, arg_syms)
 	local func = terra([arg_syms]) : ret_type
 		[ body_quote ]
 	end

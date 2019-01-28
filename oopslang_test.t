@@ -12,6 +12,7 @@ class C
 	f(x: int)
 		print(x)
 		self.x = 1
+		return x
 	end
 
 end
