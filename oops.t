@@ -5,7 +5,7 @@
 
 ]]
 
-if not ... then require'oopslang_test'; return end
+if not ... then require'oops_test'; return end
 
 --local checkreturns = require'oopslang_checkreturns'
 setfenv(1, require'low')

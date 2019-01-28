@@ -1,5 +1,5 @@
 setfenv(1, require'low')
-import'oopslang'
+import'oops'
 
 local x = 0
 local y = 5
