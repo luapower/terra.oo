@@ -17,9 +17,14 @@ class C
 
 end
 
+after C:g()
+	print'here'
+end
+
 terra f()
 	var c: C
 	c:f(5)
+	--c:g()
 end
 f()
 

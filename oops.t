@@ -12,15 +12,52 @@ setfenv(1, require'low')
 
 local oopslang = {
 	name = 'oopslang';
-	entrypoints = {'class'};
-	keywords = {'before', 'after'};
+	entrypoints = {'class', 'before', 'after'};
+	keywords = {};
 }
 
 local lang = {}
 
+function lang:parse_class(lex)
+	lex:expect'class'
+	local cls = {fields = {}, methods = {}}
+	--class name
+	cls.name = lex:expect(lex.name).value
+	--super class
+	if lex:nextif':' then
+		cls.super = lex:expect(lex.name).value
+	end
+	--declarations
+	while not lex:nextif'end' do
+		if lex:matches'before' or lex:matches'after' then
+			local where = lex:next().type
+			local name = lex:expect(lex.name).value
+			local m = lang:parse_method_def(lex, name)
+			m.hook = where
+			add(cls.methods, meth)
+		else
+			local name = lex:expect(lex.name).value
+			if lex:nextif':' then --field definition
+				local field = {name = name}
+				field.type_expr = lex:luaexpr()
+				if lex:nextif'=' then
+					field.val_expr = lex:luaexpr()
+				end
+				add(cls.fields, field)
+			elseif lex:matches'(' then --method definition
+				local m = lang:parse_method_def(lex, name)
+				add(cls.methods, m)
+			else
+				lex:error'field or method definition expected'
+			end
+		end
+	end
+	return cls
+end
+
 function lang:parse_method_def(lex, name)
 	lex:expect'('
-	local meth = {name = name, args = {}}
+	local m = {name = name, args = {}}
 	while not lex:nextif')' do --method args
 		--TODO: support escapes in arg list (splice per Terra semantics)
 		local arg = {}
@@ -28,18 +65,18 @@ function lang:parse_method_def(lex, name)
 		lex:expect':'
 		arg.type_expr = lex:luaexpr()
 		lex:nextif','
-		add(meth.args, arg)
+		add(m.args, arg)
 	end
-	if lex:nextif':' then --method return type
-		meth.returntype_expr = lex:luaexpr()
+	if lex:nextif':' then --method return type (optional)
+		m.returntype_expr = lex:luaexpr()
 	end
-	meth.body_stmts = lex:terrastats()
+	m.body_stmts = lex:terrastats()
 	lex:expect'end'
-	return meth
+	return m
 end
 
-function lang:compile_field(cls, f, env)
-	add(cls.T.entries, {field = f.name, type = f.type_expr(env)})
+function lang:compile_field(T, f, env)
+	add(T.entries, {field = f.name, type = f.type_expr(env)})
 end
 
 local function checkreturns(body_quote, arg_syms)
@@ -47,9 +84,9 @@ local function checkreturns(body_quote, arg_syms)
 	return helper:gettype().returntype
 end
 
-function lang:compile_method(cls, m, env)
+function lang:compile_method(T, m, env)
 	local fenv = setmetatable({}, {__index = env})
-	local self_sym = symbol(&cls.T, 'self')
+	local self_sym = symbol(&T, 'self')
 	fenv.self = self_sym
 	local arg_syms = {self_sym}
 	for i,arg in ipairs(m.args) do
@@ -65,59 +102,44 @@ function lang:compile_method(cls, m, env)
 	local func = terra([arg_syms]) : ret_type
 		[ body_quote ]
 	end
-	cls.T.methods[m.name] = func
+	T.methods[m.name] = func
 end
 
 function lang:compile_class(cls, env)
 	cls.T = newstruct(cls.name)
 	for i,f in ipairs(cls.fields) do
-		self:compile_field(cls, f, env)
+		self:compile_field(cls.T, f, env)
 	end
 	for i,m in ipairs(cls.methods) do
-		self:compile_method(cls, m, env)
+		self:compile_method(cls.T, m, env)
 	end
 	return cls.T
 end
 
 function oopslang:statement(lex)
-	local cls = {fields = {}, methods = {}}
-	lex:expect'class'
-	--class name
-	cls.name = lex:expect(lex.name).value
-	--super class
-	if lex:nextif':' then
-		cls.super = lex:expect(lex.name).value
-	end
-	--declarations
-	while not lex:nextif'end' do
-		if lex:matches'before' or lex:matches'after' then
-			local where = lex:next().type
-			local name = lex:expect(lex.name).value
-			local meth = lang:parse_method_def(lex, name)
-			meth.hook = where
-			add(cls.methods, meth)
-		else
-			local name = lex:expect(lex.name).value
-			if lex:nextif':' then --field definition
-				local field = {name = name}
-				field.type_expr = lex:luaexpr()
-				if lex:nextif'=' then
-					field.val_expr = lex:luaexpr()
-				end
-				add(cls.fields, field)
-			elseif lex:matches'(' then --method definition
-				local meth = lang:parse_method_def(lex, name)
-				add(cls.methods, meth)
-			else
-				lex:error'field or method definition expected'
-			end
+	if lex:matches'class' then
+		local cls = lang:parse_class(lex)
+		local ctor = function(get_env)
+			return lang:compile_class(cls, get_env())
 		end
+		return ctor, {cls.name} -- statement: name = ctor(get_env))
+	elseif lex:matches'after' or lex:matches'before' then
+		local where = lex:next().type
+		local cls_name = lex:expect(lex.name).value
+		lex:ref(cls_name)
+		lex:expect':'
+		local name = lex:expect(lex.name).value
+		local m = lang:parse_method_def(lex, name)
+		m.hook = where
+		local ctor = function(get_env)
+			local env = get_env()
+			local T = env[cls_name]
+			return lang:compile_method(T, m, env)
+		end
+		return ctor
+	else
+		lex:error'expected: class, before, after'
 	end
-	local ctor = function(environment_function)
-		local env = environment_function()
-		return lang:compile_class(cls, env)
-	end
-	return ctor, {cls.name} -- create the statement: name = ctor(environment_function))
 end
 
 oopslang.expression = oopslang.statement
