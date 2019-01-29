@@ -10,21 +10,35 @@ class C
 	x: int
 
 	f(x: int)
-		print(x)
 		self.x = 1
-		return x
+		var x = self.x
 	end
 
+	h() print'h0' end
+	h(i: int) print'h1' end
+
+	x(i: int) print'setx'; self.x = i end
+	x() print 'getx'; return self.x end
+
+	m(xx) print('m: '..(xx:asvalue())); return `self end
+
 end
 
-after C:g()
-	print'here'
-end
+after C:g() print'g' end
+--after C:g() print'after g' end
+after C:mm(xx) print('mm '..(xx:asvalue())) return `self:x(xx) end
 
 terra f()
 	var c: C
 	c:f(5)
-	--c:g()
+	c:g()
+	c:h()
+	c:h(1)
+
+	c:x(2); print(c:x())
+	print(c:m(5))
+	c:mm(123)
+	print(c.x)
 end
 f()
 
@@ -98,16 +112,12 @@ end
 todo:
 
 - escapes in method arg list
-- infer rettype based on type of expr of return statements
-- infer arg types and rettype for getters and setters
-- implicit self
 
 what can we do:
 
 - inheritance
 - auto-overriding
 - access to super's method from inside the override
-- auto-overloading
 - composing with before, after
 - private / public fields
 - init values for fields

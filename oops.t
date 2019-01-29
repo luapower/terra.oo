@@ -57,20 +57,27 @@ end
 
 function lang:parse_method_def(lex, name)
 	lex:expect'('
-	local m = {name = name, args = {}}
+	local m = {name = name, args = {}, ismacro = false}
 	while not lex:nextif')' do --method args
 		--TODO: support escapes in arg list (splice per Terra semantics)
 		local arg = {}
 		arg.name = lex:expect(lex.name).value
-		lex:expect':'
-		arg.type_expr = lex:luaexpr()
+		if lex:nextif':' then
+			arg.type_expr = lex:luaexpr()
+		else
+			m.ismacro = true
+		end
 		lex:nextif','
 		add(m.args, arg)
 	end
 	if lex:nextif':' then --method return type (optional)
 		m.returntype_expr = lex:luaexpr()
 	end
-	m.body_stmts = lex:terrastats()
+	if m.ismacro then
+		m.body_stmts = lex:luastats()
+	else
+		m.body_stmts = lex:terrastats()
+	end
 	lex:expect'end'
 	return m
 end
@@ -102,18 +109,55 @@ function lang:compile_method(T, m, env)
 	local func = terra([arg_syms]) : ret_type
 		[ body_quote ]
 	end
-	T.methods[m.name] = func
+	local existing_func = T.methods[m.name]
+	if terralib.type(existing_func) == 'overloadedterrafunction' then
+		existing_func:adddefinition(func)
+	elseif existing_func then
+		T.methods[m.name] = overload(m.name, {existing_func, func})
+	else
+		T.methods[m.name] = func
+	end
+end
+
+function lang:compile_macro(T, m, env)
+	local existing_func = T.methods[m.name]
+	assert(not existing_func, 'NYI: overriding with a macro')
+	local fenv = setmetatable({}, {__index = env})
+	T.methods[m.name] = macro(function(self, ...)
+		fenv.self = self
+		for i,arg in ipairs(m.args) do
+			fenv[arg.name] = select(i, ...)
+		end
+		return m.body_stmts(fenv) or quote end
+	end)
+end
+
+function lang:compile_method_or_macro(T, m, env)
+	if m.ismacro then
+		self:compile_macro(T, m, env)
+	else
+		self:compile_method(T, m, env)
+	end
 end
 
 function lang:compile_class(cls, env)
-	cls.T = newstruct(cls.name)
+	local T = newstruct(cls.name)
+	cls.T = T
+	T.metamethods.__methodmissing = macro(function(name, self, ...)
+		if select('#', ...) == 0 then --default getter
+			return `self.[name]
+		elseif select('#', ...) == 1 then --default setter
+			local arg = ...
+			return quote self.[name] = arg end
+		end
+	end)
 	for i,f in ipairs(cls.fields) do
-		self:compile_field(cls.T, f, env)
+		self:compile_field(T, f, env)
 	end
 	for i,m in ipairs(cls.methods) do
-		self:compile_method(cls.T, m, env)
+		self:compile_method_or_macro(T, m, env)
 	end
-	return cls.T
+	return T
 end
 
 function oopslang:statement(lex)
@@ -134,7 +178,7 @@ function oopslang:statement(lex)
 		local ctor = function(get_env)
 			local env = get_env()
 			local T = env[cls_name]
-			return lang:compile_method(T, m, env)
+			return lang:compile_method_or_macro(T, m, env)
 		end
 		return ctor
 	else
