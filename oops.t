@@ -96,22 +96,18 @@ function class:build_method(m, env, arg_syms)
 		fenv[arg_sym.displayname] = arg_sym
 	end
 	local body_quote = m.body_stmts(fenv); m.body_stmts = nil
-	local ret_type
-	if m.ret_type_expr then
-		ret_type = m.ret_type_expr(env); m.ret_type_expr = nil
-	end
 	local func
-	if ret_type then
-		func = terra([arg_syms]): ret_type
+	if m.ret_type then
+		func = terra([arg_syms]): m.ret_type
 			[ body_quote ]
 		end
 	else --autodetect return type
 		func = terra([arg_syms])
 			[ body_quote ]
 		end
-		ret_type = func:gettype().returntype
+		m.ret_type = func:gettype().returntype
 	end
-	return func, ret_type, arg_syms
+	return func, m.ret_type, arg_syms
 end
 
 function class:build_macro(m, env)
@@ -147,16 +143,15 @@ function class:compile_method(m, env)
 			--make `retval` available to "after" hooks
 			local retval_sym = symbol(ret_type, 'retval')
 			local after_func, after_ret_type = self:build_method(m, env, {retval_sym})
-			if after_ret_type:isunit() then --pass-by-reference.
-				func = terra([arg_syms]) : ret_type
+			if after_ret_type:isunit() then
+				func = terra([arg_syms]): ret_type
 					var [retval_sym] = func([arg_syms])
-					after_func(&[retval_sym], [arg_syms])
+					after_func([retval_sym], [arg_syms])
 					return [retval_sym]
 				end
-			else --hook returns a value: pass-by-value and return it back.
-				func = terra([arg_syms]) : ret_type
-					var [retval_sym] = func([arg_syms])
-					return after_func([retval_sym], [arg_syms])
+			else --hook returns a value: return it back.
+				func = terra([arg_syms]): ret_type
+					return after_func(func([arg_syms]), [arg_syms])
 				end
 			end
 		end
@@ -238,11 +233,14 @@ function class:compile(env)
 		for i,entry in ipairs(super.T.entries) do
 			T.entries[i] = entry
 		end
-		--import methods super's virtual methods
+		--copy super's virtual methods into our vtable
 		for vt_index, name in ipairs(super.vtable_names) do
 			local func = super.vtable[vt_index]
+			self.vtable[vt_index] = func
+			self.vtable_names[vt_index] = name
 			self:add_method(name, func)
 		end
+		self.vt_index = super.vt_index
 	else
 		add(T.entries, {field = '__vtable', type = &&opaque})
 	end
@@ -312,6 +310,7 @@ function class:compile(env)
 		end
 	end)
 
+	--compile all methods so that we can build the vtable.
 	for _,m in ipairs(methods) do
 		self:compile_method_or_macro(m, env)
 	end

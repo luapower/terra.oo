@@ -12,7 +12,8 @@ class C
 	end
 
 	after f(a: int)
-		print('3 f(a)', a, retval); return retval+1
+		print('3 f(a)', a, retval)
+		return retval+1
 	end
 
 end
