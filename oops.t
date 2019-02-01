@@ -144,13 +144,22 @@ end
 local nothing = quote end
 local function mkterra(arg_syms, ret_type, body_quote)
 	body_quote = body_quote or nothing
-	if ret_type then
-		return terra([arg_syms]): ret_type body_quote end
-	else
-		return terra([arg_syms]) body_quote end
-	end
+	return ret_type
+		and terra([arg_syms]): ret_type body_quote end
+		 or terra([arg_syms]) body_quote end
 end
 
+--pluck the arg symbols from a defined function.
+local function func_arg_syms(func)
+	local syms = {}
+	for i,var_ in ipairs(func.definition.parameters) do
+		add(syms, var_.symbol)
+	end
+	return syms
+end
+
+--build a terra function in a lexical environment. arg_syms are additional
+--symbols to inject in the function environment and pass as first args.
 function class:compile_terra(ast, env, arg_syms)
 	local fenv = setmetatable({}, {__index = env})
 	local self_sym = symbol(&self.T, 'self')
@@ -164,6 +173,7 @@ function class:compile_terra(ast, env, arg_syms)
 	return func, arg_syms
 end
 
+--build a macro in a lexical environment.
 function class:compile_macro(ast, env)
 	local fenv = setmetatable({}, {__index = env})
 	local func = macro(function(self, ...)
@@ -176,8 +186,9 @@ function class:compile_macro(ast, env)
 	return func
 end
 
-class.compile_hook = {}
+class.compile_hook = {} --{where -> compile}
 
+--attach a "before" hook to a method.
 function class.compile_hook:before(ast, env, func)
 	local ret_type = func:gettype().returntype
 	local before_func, arg_syms = self:compile_method(ast, env)
@@ -187,6 +198,7 @@ function class.compile_hook:before(ast, env, func)
 	end
 end
 
+--attach an "after" hook to a method.
 function class.compile_hook:after(ast, env, func)
 	local ret_type = func:gettype().returntype
 	--make `retval` available to "after" hooks
@@ -206,14 +218,23 @@ function class.compile_hook:after(ast, env, func)
 	end
 end
 
+--override a method.
 function class.compile_hook:over(ast, env, func)
-	--TODO:
+	local func_type = func:gettype()
+	local inherited_sym = symbol(&func_type, 'inherited')
+	local over_func, arg_syms = self:compile_method(ast, env, {inherited_sym})
+	table.remove(arg_syms, 1)
+	return terra([arg_syms]): func_type.returntype
+		var [inherited_sym] = func
+		return over_func([inherited_sym], [arg_syms])
+	end
 end
 
 function class:compile_method(ast, env, arg_syms)
 	if ast.compiling then
 		--recursive reference, make a stub to be replaced later.
-		ast.stub = ast.stub or mkterra(ast.arg_syms, ast.ret_type)
+		local arg_syms = arg_syms and extend({}, arg_syms, ast.arg_syms) or ast.arg_syms
+		ast.stub = ast.stub or mkterra(arg_syms, ast.ret_type)
 		return ast.stub
 	end
 	if ast.func then --already compiled
@@ -222,9 +243,9 @@ function class:compile_method(ast, env, arg_syms)
 	ast.compiling = true --catch recursive references from __methodmissing
 	local func
 	if self.ismacro then
-		func = self:compile_macro(ast, env, arg_syms)
+		func, arg_syms = self:compile_macro(ast, env, arg_syms)
 	else
-		func = self:compile_terra(ast, env, arg_syms)
+		func, arg_syms = self:compile_terra(ast, env, arg_syms)
 	end
 	if ast.hooks then
 		assert(not ast.hook) --hooks can't have hooks
@@ -244,30 +265,25 @@ function class:compile_method(ast, env, arg_syms)
 		self:_addmethod(ast.name, ast.sig, func)
 	end
 	ast.func = func
-	return func
+	return func, arg_syms
 end
 
-function class:vtable_index(sig)
-	local m = self.super and self.super.methods[sig]
-	return m and m.vt_index or #self.vtable + 1
-end
-
-function class:make_virtual(func, sig)
-	local vt_index = self:vtable_index(sig)
-	self.vtable[vt_index] = func
-	local m = self.methods[sig]
-	m.vt_index = vt_index
-	m.func = func
-	local func_type = func:gettype()
-	local ret_type = func_type.returntype
-	return terra([arg_syms]): ret_type
-		var fn = [&func_type]([arg_syms[1]].__vtable[vt_index-1])
-		return fn([arg_syms])
+function class:make_virtual(sig, func)
+	local vt_index = self.vfuncs[sig]
+	if vt_index then --replace implementation
+		self.vtable[vt_index] = func
+	else --allocate a new slot
+		vt_index = #self.vtable + 1
+		self.vtable[vt_index] = func
+		self.vfuncs[sig] = vt_index
+		local func_type = func:gettype()
+		local ret_type = func_type.returntype
+		local arg_syms = func_arg_syms(func)
+		return terra([arg_syms]): ret_type
+			var fn = [&func_type]([arg_syms[1]].__vtable[vt_index-1])
+			return fn([arg_syms])
+		end
 	end
-end
-
-function class:override()
-	--
 end
 
 function class:_addmethod(name, sig, func)
@@ -280,7 +296,8 @@ function class:_addmethod(name, sig, func)
 	else
 		self.methods[sig] = {name = name, sig = sig, func = func}
 	end
-	--func = self:make_virtual(func, sig)
+	func = self:make_virtual(sig, func)
+	if not func then return end --virtual impl. replaced
 	--add or overload a method.
 	local func0 = self.T.methods[name]
 	if not func0 then
@@ -376,7 +393,7 @@ function class:compile(env)
 
 	self.methods = {} --{sig -> m}
 	self.vtable = {}  --{vt_index -> vfunc}
-	self.vfuncs = {}  --{sig -> vfunc}
+	self.vfuncs = {}  --{sig -> vt_index}
 
 	if self.super_type then
 
@@ -468,10 +485,12 @@ function class:compile(env)
 
 	local vtable = constant(`arrayof([&opaque], [self.vtable]))
 
-	self:addmethod('init', terra(self: &self.T)
+	--can't be virtual since it has to initialize the vtable, and it doesn't
+	--have to be becuase no method in a descendant would call this anyway.
+	terra self.T:init()
 		self.__vtable = vtable
 		return self
-	end)
+	end
 
 	self.T.metamethods.__cast = __cast
 

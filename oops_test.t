@@ -3,6 +3,7 @@ import'oops'
 
 class C
 
+	--[[
 	f(x: int): int
 		self:g()
 		--print('2 f(x)', x);
@@ -10,6 +11,11 @@ class C
 	end
 
 	g() if false then self:f(321) end print'g' end
+	]]
+
+	f(x: int):int print(x); return -x end
+
+	over f(x: int): int print'before'; x=inherited(self, x+1); print'after'; return x end
 
 	--[[
 	before f(y: int)
