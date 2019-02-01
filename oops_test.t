@@ -3,10 +3,15 @@ import'oops'
 
 class C
 
-	before f(x: int)
-		print('2 f(x)', x); return x+1
+	f(x: int): int
+		self:g()
+		--print('2 f(x)', x);
+		return x+1
 	end
 
+	g() if false then self:f(321) end print'g' end
+
+	--[[
 	before f(y: int)
 		print('1 f(y)', y)
 	end
@@ -15,6 +20,7 @@ class C
 		print('3 f(a)', a, retval)
 		return retval+1
 	end
+	]]
 
 end
 
