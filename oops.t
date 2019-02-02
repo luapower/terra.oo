@@ -269,18 +269,18 @@ function class:compile_method(ast, env, arg_syms)
 end
 
 function class:make_virtual(sig, func)
-	local vt_index = self.vfuncs[sig]
-	if vt_index then --replace implementation
-		self.vtable[vt_index] = func
-	else --allocate a new slot
-		vt_index = #self.vtable + 1
-		self.vtable[vt_index] = func
-		self.vfuncs[sig] = vt_index
+	local vidx = self.vindex[sig]
+	if vidx then --replace implementation
+		self.vtable[vidx] = func
+	else --allocate a new slot and method stub
+		vidx = #self.vtable + 1
+		self.vtable[vidx] = func
+		self.vindex[sig] = vidx
 		local func_type = func:gettype()
 		local ret_type = func_type.returntype
 		local arg_syms = func_arg_syms(func)
 		return terra([arg_syms]): ret_type
-			var fn = [&func_type]([arg_syms[1]].__vtable[vt_index-1])
+			var fn = [&func_type]([arg_syms[1]].__vtable[vidx-1])
 			return fn([arg_syms])
 		end
 	end
@@ -391,16 +391,16 @@ function class:compile(env)
 
 	self:init_signature_function(self.super)
 
-	self.methods = {} --{sig -> m}
-	self.vtable = {}  --{vt_index -> vfunc}
-	self.vfuncs = {}  --{sig -> vt_index}
+	self.methods = {} --{sig  -> m}
+	self.vtable  = {} --{vidx -> vfunc}
+	self.vindex  = {} --{sig  -> vidx}
 
 	if self.super_type then
 
 		--inherit the vtable (later modified with overrides).
 		if self.super then
 			extend(self.vtable, self.super.vtable)
-			update(self.vfuncs, self.super.vfuncs)
+			update(self.vindex, self.super.vindex)
 		end
 
 		--inherit non-private methods from a type.
@@ -423,7 +423,7 @@ function class:compile(env)
 			else
 				error('duplicate method definition for '..ast.name)
 			end
-		elseif self.vfuncs[ast.sig] then --override inherited virtual method
+		elseif self.vindex[ast.sig] then --override inherited virtual method
 			if ast.hook then
 
 			else
