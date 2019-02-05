@@ -1,167 +1,137 @@
 setfenv(1, require'low')
 import'oops'
 
-class C
-
-	--[[
-	f(x: int): int
-		self:g()
-		--print('2 f(x)', x);
-		return x+1
+do
+	local class C1
+		_x: int --private field
+		 y: int --public field
 	end
 
-	g() if false then self:f(321) end print'g' end
-	]]
+	local class C2 : C1 end --private fields are not inherited.
 
-	f(x: int):int print(x); return -x end
-
-	over f(x: int): int print'before'; x=inherited(self, x+1); print'after'; return x end
-
-	--[[
-	before f(y: int)
-		print('1 f(y)', y)
+	local class C3 : C1
+		_x: int --private with the same name as super's: not clashing.
+		--y: int
+		--^^uncomment: public field with the same name as super's: clashing.
 	end
 
-	after f(a: int)
-		print('3 f(a)', a, retval)
-		return retval+1
+	local terra test()
+		var c1: C1; c1:init()
+			c1._x = 1
+			c1.y = 1
+		var c2: C2; c2:init()
+			--c2._x = 1
+			--^^uncomment: invalid field: private, not inherited.
+			c2.y = 1 --public field: inherited.
+		var c3: C3; c3:init()
+			c3._x = 1
+			c3.y = 1
 	end
-	]]
-
+	function test_private_fields()
+		--C1:printpretty()
+		--C2:printpretty()
+		--C3:printpretty()
+		test()
+	end
 end
 
-terra test()
-	var c: C; c:init()
-	print(c:f(5))
-end
-test()
-
---[[
-
-
-local x = 0
-local y = 5
-local p = symbol(int)
-
-class C
-
-	g() self:f(20) end --uses undeclared self.f and self.x
-
-	x: int
-
-	f(x: int)
-		self.x = x
+do
+	local class C1
+		_x: int --private field
 	end
-
-	h() print'h0' end
-	h(i: int) print'h1' end
-
-	x(i: int) print'setx'; self.x = i end
-	x() print 'getx'; return self.x end
-
-	m(xx) print('m: '..(xx:asvalue())); return `self end
-
-	after x(i: int) print('after x(i:int)', i) end
-	before x(i: int) print('before x(i:int)', i) end
-	after x() retval = 25; print('after x()', retval) end
-	before x() print'before x()' end
-
+	local terra test()
+		var c1: C1; c1:init()
+			c1:set_x(5) --setter was auto-created.
+			var x = c1:x() --getter was auto-created.
+			assert(x == 5)
+	end
+	function test_auto_getters_setters()
+		--C1:printpretty()
+		test()
+	end
 end
 
-class C1: C
-
-	f(x: int)
-		print('override', x)
+do
+	local class C1
+		_x: int --private field
+		f() var x = self:x() end --getter auto-created by using it
+		g() self:set_x(5) end    --setter auto-created by using it
 	end
-
+	local class C2 : C1
+		--
+	end
+	local terra test()
+		var c2: C2; c2:init()
+		c2:set_x(3)
+		var x = c2:x()
+		assert(x == 3)
+	end
+	function test_getter_setter_inheritance()
+		test()
+	end
 end
 
-terra f()
-	var c: C1; c:init()
-	c:g()
-	--c:f(5)
-	--c:h()
-	--c:h(1)
-	--c:x(2)
-	--print(c:x())
-	--print(c:m(5))
-	--print(c.x)
-end
-f()
-]]
-
-
---[[
-class C0
-
-	myfield: int = x + y
-
-	mymethod(p: int): {int,char}
-		var x = 1
+do
+	local class C1
+		f(x: int) return x+1 end --static because no one in C1 uses it.
+		h(x: int) return x*x end
+		--gg() self:f(5) end
+		--^^uncomment so f is virtual so casting a C2->C1 calls C2:f()
 	end
-
-	myvirtual(i: int): int
-		return 5
+	local class C2: C1
+		g(x: int) return self:f(x) end --calls C2:f() defined below.
+		f(x: int) return x+2 end --defined after g(), but compiled before g().
 	end
-
-	callsvirtual(i: int): int
-		return self:myvirtual(i)
+	local terra test()
+		var c2: C2; c2:init()
+		var x = c2:g(5)
+		assert(x == 7)
+		assert(c2:h(3) == 9) --inherited h().
+		assert([&C1](&c2):f(5) == 6) --calling C1:f() because it's static.
 	end
-
-	--inherit C0.*
-
+	function test_static_inheritance()
+		test()
+	end
 end
 
-class C1: C0
-
-	myfield2: char
-
-	_border_width: int
-
-	border_width: int
-
-	get_border_width()
-		return 5
+do
+	local class C1
+		f(x: int) return x+1 end --virtualized because g() uses it.
+		g(x: int) return self:f(x) end
 	end
-
-	set_border_width(v: int)
-		return 7
+	local class C2: C1
+		f(x: int) return x+2 end --override
 	end
-
-	myvirtual(i: int): int
-		return inherited(self, i) + 1
+	local terra test()
+		var c2: C2; c2:init()
+		var x = c2:g(50)
+		assert(x == 52)
 	end
-
-	myvirtual(i: int, j: int): int --overloaded
-		border_width = i
+	function test_method_override()
+		test()
 	end
-
-	before callsvrtual(i: int)
-		print('before', i)
-	end
-
-	after callsvirtual(i: int)
-		print('after', i)
-	end
-
-	after set_border_width(v: int)
-
-	end
-
 end
-]]
 
---pr(C0)
---pr(C1)
+do
+	local class C1
+		h(x: int): int return iif(x > 0, self:f(x), x) end
+		g(x: int): int return self:f(x) end
+		f(x: int): int return iif(x > 0, self:h(-x), self:g(-x)) end
+		s(x: int): int return iif(x > 0, self:s(x-1), x) end --self-recursion
+	end
+	local terra test()
+		var c1: C1; c1:init()
+		assert(c1:h(5) == -5)
+		assert(c1:s(10) == 0)
+	end
+	function test_recursion()
+		test()
+	end
+end
 
-
---[[
-
-TODO:
-
-- access to super's method from inside the override
-- private / public fields
-- init values for fields
-- escapes in method arg list
-
-]]
+test_private_fields()
+test_auto_getters_setters()
+test_getter_setter_inheritance()
+test_static_inheritance()
+test_method_override()
+test_recursion()
