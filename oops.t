@@ -33,17 +33,17 @@ function class:parse(lex)
 			--before|after|over <method_def>|<macro_def>
 			local hook = lex:next().type
 			local name = lex:expect(lex.name).value
-			local m = self:parse_method_or_macro_def(lex, name)
-			m.hook = hook
-			add(self.ast.methods, m)
+			local ast = self:parse_method_or_macro_def(lex, name)
+			ast.hook = hook
+			add(self.ast.methods, ast)
 		else
 			local name = lex:expect(lex.name).value
 			if lex:nextif':' then --<field_def>
-				local f = self:parse_field_def(lex, name)
-				add(self.ast.fields, f)
+				local ast = self:parse_field_def(lex, name)
+				add(self.ast.fields, ast)
 			elseif lex:matches'(' then --<method_def> | <macro_def>
-				local m = self:parse_method_or_macro_def(lex, name)
-				add(self.ast.methods, m)
+				local ast = self:parse_method_or_macro_def(lex, name)
+				add(self.ast.methods, ast)
 			else
 				lex:error'field or method definition expected'
 			end
@@ -53,7 +53,7 @@ end
 
 --<field_name>: field_type_expr [=init_const_expr]
 function class:parse_field_def(lex, name)
-	local f = {name = name}
+	local f = {name = name, private = name:starts'_' or nil}
 	f.type_expr = lex:luaexpr()
 	if lex:nextif'=' then
 		f.val_expr = lex:luaexpr()
@@ -65,7 +65,8 @@ end
 --macro:  <name>(arg_name, ...)
 function class:parse_method_or_macro_def(lex, name, hook)
 	lex:expect'('
-	local m = {name = name, args = {}, ismacro = false, virtual = true}
+	local ast = {name = name, args = {}, ismacro = false, virtual = true,
+		private = name:starts'_' or nil}
 	while not lex:nextif')' do --method args
 		--TODO: support escapes in arg list (splice per Terra semantics)
 		local arg = {}
@@ -73,17 +74,17 @@ function class:parse_method_or_macro_def(lex, name, hook)
 		if lex:nextif':' then
 			arg.type_expr = lex:luaexpr()
 		else
-			m.ismacro = true
+			ast.ismacro = true
 		end
 		lex:nextif','
-		add(m.args, arg)
+		add(ast.args, arg)
 	end
 	if lex:nextif':' then --method return type (optional)
-		m.ret_type_expr = lex:luaexpr()
+		ast.ret_type_expr = lex:luaexpr()
 	end
-	m.body_stmts = m.ismacro and lex:luastats() or lex:terrastats()
+	ast.body_stmts = ast.ismacro and lex:luastats() or lex:terrastats()
 	lex:expect'end'
-	return m
+	return ast
 end
 
 --compiler -------------------------------------------------------------------
@@ -93,7 +94,7 @@ function class:compile_field(ast, env)
 		name = ast.name,
 		field = self.name..'.'..ast.name,
 		type = ast.type_expr(env),
-		private = ast.name:starts'_',
+		private = ast.private,
 	})
 end
 
@@ -161,14 +162,13 @@ end
 --build a terra function in a lexical environment. extra_arg_syms are extra
 --symbols to inject in the function environment and pass as first args.
 --compilation is re-entrant to support recursive references.
-function class:compile_terra(ast, env, extra_arg_syms)
+function class:compile_terra(ast, env, extra_arg_syms, inherited_func)
 
 	local arg_syms = extra_arg_syms
 		and extend({}, extra_arg_syms, ast.arg_syms) or ast.arg_syms
 
 	if ast.compiling then --recursive reference, make a stub to be replaced later.
 		ast.stub = ast.stub or mkterra(arg_syms, ast.ret_type)
-		print('compiling', self.name, ast.sig, ast, ast.compiling, ast.ret_type)
 		return ast.stub
 	end
 
@@ -179,10 +179,11 @@ function class:compile_terra(ast, env, extra_arg_syms)
 		fenv[arg_sym.displayname] = arg_sym
 	end
 	ast.compiling = true --trap recursive references from __methodmissing
-	print('start compile', self.name, ast.sig, ast, ast.compiling)
+	local saved_inherited_func = self.T.methods.inherited
+	self.T.methods.inherited = inherited_func
 	local body_quote = ast.body_stmts(fenv); ast.body_stmts = nil
 	local func = mkterra(arg_syms, ast.ret_type, body_quote)
-	print('end compile', self.name, ast.sig, ast, ast.compiling)
+	self.T.methods.inherited = saved_inherited_func
 	ast.compiling = false
 
 	if ast.stub then
@@ -208,12 +209,11 @@ function class:compile_macro(ast, env)
 	end)
 end
 
-function class:compile_method(ast, env)
-	ast.private = ast.name:starts'_' or nil
-	if self.ismacro then
-		return self:compile_macro(ast, env)
+function class:compile_method(ast, env, inherited_func)
+	if ast.ismacro then
+		return self:compile_macro(ast, env, inherited_func)
 	else
-		return self:compile_terra(ast, env)
+		return self:compile_terra(ast, env, inherited_func)
 	end
 end
 
@@ -230,6 +230,63 @@ function class:compile_setter(sig)
 	local val_t = self:entry('_'..name)
 	return val_t and terra(self: &self.T, val: val_t)
 		self.['_'..name] = val
+	end
+end
+
+function class:compile_macro_override(ast, env, func)
+	return self:compile_macro(ast, env)
+end
+
+local compile_terra_override = {}
+
+function compile_terra_override:over(ast, env, func)
+	local func_type = func:gettype()
+	local inherited_sym = symbol(&func_type, 'inherited')
+	local over_func = self:compile_terra(ast, env, {inherited_sym}, func)
+	return mkterra(ast.arg_syms, ast.ret_type, quote
+		var [inherited_sym] = func
+		return over_func([inherited_sym], [ast.arg_syms])
+	end)
+end
+
+function compile_terra_override:before(ast, env, func)
+	local before_func = self:compile_terra(ast, env, nil, func)
+	return mkterra(ast.arg_syms, ast.ret_type, quote
+		before_func([ast.arg_syms])
+		return func([ast.arg_syms])
+	end)
+end
+
+function compile_terra_override:after(ast, env, func)
+	local ret_type = func:gettype().returntype
+	--make `retval` available in the hook's environment
+	local retval_sym = symbol(&ret_type, 'retval')
+	local after_func = self:compile_terra(ast, env, {retval_sym}, func)
+	if after_func:gettype().returntype:isunit() then
+		return mkterra(ast.arg_syms, ast.ret_type, quote
+			var retval = func([ast.arg_syms])
+			after_func(&retval, [ast.arg_syms])
+			return retval
+		end)
+	else --hook returns a value: return it back.
+		return mkterra(ast.arg_syms, ast.ret_type,
+			`after_func(func([ast.arg_syms]), [ast.arg_syms])
+		)
+	end
+end
+
+function class:compile_terra_override(ast, env, func)
+	return compile_terra_override[ast.hook](self, ast, env, func)
+end
+
+function class:compile_method_override(ast, env, func)
+	assert(ast.hook and func)
+	if ast.ismacro then
+		assert(type(func) == 'terramacro')
+		return self:compile_macro_override(ast, env)
+	else
+		assert(type(func) == 'terrafunction')
+		return self:compile_terra_override(ast, env, func)
 	end
 end
 
@@ -281,14 +338,19 @@ end
 --this contains all the logic of method generation including deciding when
 --to compile a method, when to create getters and setters, when to make
 --a static method virtual and when to override an inherited (or new) method.
-function class:resolve_method(sig, env, used, ast)
+function class:resolve_method(sig, env, used)
 	local func
 	local m = self.methods[sig]
 	if m then
-		if m.ast and (not m.func or m.inherited) then --not compiled
+		func = m.vfunc or m.func --previously compiled or inherited
+		if not func and m.ast then --new
 			func = self:compile_method(m.ast, env)
-		else --compiled or inherited
-			func = m.func
+		end
+		if m.hooks then --hooks over new or inherited
+			for _,ast in ipairs(m.hooks) do
+				func = self:compile_method_override(ast, env, func)
+			end
+			m.hooks = nil
 		end
 	elseif #sig == 1 then
 		func = self:compile_getter(sig)
@@ -296,22 +358,21 @@ function class:resolve_method(sig, env, used, ast)
 		func = self:compile_setter(sig)
 	end
 	if not func then
-		error('method missing '..sig[1])
+		return
 	end
 	if not m then
 		m = {}; self.methods[sig] = m
 	end
 	--new implementation, update it.
-	if func ~= m.func then
+	if func ~= (m.vfunc or m.func) then
 		if m.vfunc then --virtual, replace the implementation
 			m.vfunc = func
 			self.vtable[self.vindex[sig]] = func
 		else --static
 			m.func = func
 		end
-		m.inherited = nil
 	end
-	--make the method virtual if needed.
+	--make the method virtual if needed and possible (not self.compiled).
 	if used and not m.private and not m.vfunc and not self.compiled then
 		assert(not self.vindex[sig])
 		--allocate a new slot and method stub
@@ -319,7 +380,6 @@ function class:resolve_method(sig, env, used, ast)
 		self.vindex[sig] = vidx
 		self.vtable[vidx] = func
 		m.vfunc = func
-		m.inherited = nil
 		local func_type = func:gettype()
 		func = mksameterra(func, function(args)
 			return quote
@@ -411,7 +471,6 @@ function class:compile(env)
 			if not m.private then
 				self.methods[sig] = {
 					func = m.func,
-					inherited = true, --func must be replaced on override
 					vfunc = m.vfunc,  --virtual function, this is the impl.
 				}
 			end
@@ -420,36 +479,37 @@ function class:compile(env)
 		--TODO: inherit methods from any aggregate type.
 	end
 
-	--add new (not-yet-compiled) methods. we need to know beforehand which
-	--methods are overrides and which ones are new.
+	--add new (to-compile) methods and their hooks, in order.
 	for i,ast in ipairs(self.ast.methods) do
 		self:type_method(ast, env)
 		local m = self.methods[ast.sig]
 		if not m then
 			assert(not ast.hook, 'missing method to override for '..ast.name)
-			m = {private = ast.private}
+			m = {ast = ast, private = ast.private}
 			self.methods[ast.sig] = m
-		elseif not m.inherited then
+		else
 			assert(ast.hook, 'duplicate definition for '..ast.name)
+			m.hooks = m.hooks or {}
+			add(m.hooks, ast)
 		end
-		m.ast = m.ast or ast --only add the ast of the first definition.
 	end
 
 	--__methodmissing hook to compile dependent methods on-demand and to figure
 	--out which ones are called by other methods so as to make them virtual.
 	self.T.metamethods.__methodmissing = macro(function(name, obj, ...)
-
 		local nargs = select('#', ...)
 		local arg_types = {}
 		for i = 1, nargs do
 			local arg = select(i, ...)
 			arg_types[i] = arg:gettype()
 		end
-		local sig =
-				self:signature(name, unpack(arg_types))
-			or self:signature(name, nargs)
-
-		local func = self:resolve_method(sig, env, true)
+		local sig = self:signature(name, unpack(arg_types))
+		local func =
+			   self:resolve_method(sig, env, true)
+			or self:resolve_method(self:signature(name, nargs), env, true)
+		if not func then
+			error('method missing '..tostring(sig))
+		end
 		local args = {...}
 		return `func(&obj, [args])
 	end)
@@ -462,7 +522,7 @@ function class:compile(env)
 	-- it inferred if they are compiled after.
 	-- 3) to stop at the same compilation error every time.
 	for i,ast in ipairs(self.ast.methods) do
-		self:resolve_method(ast.sig, env, false, ast)
+		self:resolve_method(ast.sig, env)
 	end
 
 	local vtable = constant(`arrayof([&opaque], [self.vtable]))
