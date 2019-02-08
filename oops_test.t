@@ -1,7 +1,7 @@
 setfenv(1, require'low')
 import'oops'
 
-do
+function test_private_fields()
 	local class C1
 		_x: int --private field
 		 y: int --public field
@@ -27,56 +27,32 @@ do
 			c3._x = 1
 			c3.y = 1
 	end
-	function test_private_fields()
-		--C1:printpretty()
-		--C2:printpretty()
-		--C3:printpretty()
-		test()
-	end
+	--C1:printpretty()
+	--C2:printpretty()
+	--C3:printpretty()
+	test()
 end
 
-do
+function test_inheritance()
 	local class C1
 		f(x: int): int return x+1 end
-		h(x: int): int return x*x end
-		--gg() self:f(5) end
-		--^^uncomment so f is virtual so casting a C2->C1 calls C2:f()
-	end
-	local class C2: C1
-		g(x: int): int return self:f(x) end --calls C2:f() defined below.
-		over f(x: int): int return self:inherited(x)+1 end --defined after g(), but compiled before g().
-	end
-	local terra test()
-		var c2: C2; c2:init()
-		var x = c2:g(5)
-		assert(x == 7)
-		assert(c2:h(3) == 9) --inherited h().
-		assert([&C1](&c2):f(5) == 7) --calling C2:f() because f is virtual
-	end
-	function test_inheritance()
-		test()
-	end
-end
-
-do
-	local class C1
-		f(x: int): int return x+1 end --virtualized because g() uses it.
 		g(x: int): int return self:f(x) end
 	end
 	local class C2: C1
+		h(x: int): int return x*x end
 		over f(x: int): int return self:inherited(x)+1 end --override
 	end
 	local terra test()
 		var c2: C2; c2:init()
-		var x = c2:g(50)
-		assert(x == 52)
+		var x = c2:g(5) --inherited, not overriden. calls overriden C2:f()
+		assert(x == 7)
+		assert(c2:h(3) == 9) --not inherited, not overriden.
+		assert([&C1](&c2):f(5) == 7) --calling C2:f() still
 	end
-	function test_method_override()
-		test()
-	end
+	test()
 end
 
-do
+function test_recursion()
 	local class C1
 		h(x: int): int return iif(x > 0, self:f(x), x) end
 		g(x: int): int return self:f(x) end
@@ -88,12 +64,10 @@ do
 		assert(c1:h(5) == -5)
 		assert(c1:s(10) == 0)
 	end
-	function test_recursion()
-		test()
-	end
+	test()
 end
 
-do
+function test_macros()
 	local class C1
 		g(x) return `-self:f(x) end --decl. order doesn't matter
 		f(x)
@@ -108,12 +82,10 @@ do
 		var c1: C1; c1:init()
 		assert(c1:g(5) == 5)
 	end
-	function test_macros()
-		test()
-	end
+	test()
 end
 
-do
+function test_macro_override()
 	local class C1
 		f(x) return `x*x end
 		g(x) return `-self:f(x) end
@@ -131,12 +103,10 @@ do
 		assert(c2:h(5) == -5)
 		assert([&C1](&c2):g(5) == -25)
 	end
-	function test_macro_override()
-		test()
-	end
+	test()
 end
 
-do
+function test_hooks()
 	local class C1
 		f(x: int): int return x+1 end
 		g(x: int): int return self:f(x) end
@@ -153,12 +123,10 @@ do
 		assert(c2.before_hit)
 		assert(c2.after_hit)
 	end
-	function test_hooks()
-		test()
-	end
+	test()
 end
 
-do
+function test_init_values()
 	local class C1
 		_x: int = 5
 		 y: int = 7
@@ -178,15 +146,34 @@ do
 		assert(c2. z == 9)
 		assert(c2. y == 7)
 	end
-	function test_init_values()
-		test()
+	test()
+end
+
+function test_nocompile()
+	local class C1 nocompile end
+	local class C2 : C1 nocompile end
+
+	over   C2:ff() print'C2:over['; self:inherited() print']' end
+	over   C1:f() print'C1:f()' end
+	after  C2:f() print'after C2:f()' end
+	before C2:f() print'before C2:f()' end
+
+	fn C1:f() print'C1:f()' end
+	fn C1:g() print'C1:g()' self:f() end
+
+	C2:compile() --auto-compiles super
+
+	terra test()
+		var c2: C2; c2:init()
+		c2:ff()
 	end
+	test()
 end
 
 test_private_fields()
 test_inheritance()
-test_method_override()
 test_recursion()
 test_macro_override()
 test_hooks()
 test_init_values()
+--test_nocompile()

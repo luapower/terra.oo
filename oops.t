@@ -27,6 +27,10 @@ function class:parse(lex)
 	if lex:nextif':' then
 		self.ast.super_expr = lex:luaexpr()
 	end
+	--nocompile flag
+	if lex:nextif'nocompile' then
+		self.nocompile = true
+	end
 	--definitions: <field_def> | <method_def> | <macro_def> | <hook_def>
 	while not lex:nextif'end' do
 		if lex:matches'before' or lex:matches'after' or lex:matches'over' then --<hook_def>
@@ -49,6 +53,11 @@ function class:parse(lex)
 			end
 		end
 	end
+
+	self.T = newstruct(self.name)
+	self.T.metamethods.class = self
+	self.T.compile = self.tcompile
+	return self.T
 end
 
 --<field_name>: field_type_expr [=init_const_expr]
@@ -267,15 +276,13 @@ end
 
 function class:compile(env)
 
-	self.T = newstruct(self.name)
-	self.T.metamethods.class = self
-
 	--eval super_expr in `class <name>: <super_expr>`
 	if self.ast.super_expr then
 		local st = self.ast.super_expr(env)
 		if st then
-			assert(st:isstruct(), 'trying to inherit from non-struct type'..tostring(st))
-			self.super = assert(st.metamethods.class, 'struct is not a class '..tostring(st))
+			assert(st:isstruct(), 'trying to inherit from non-struct type',st)
+			self.super = assert(st.metamethods.class, 'struct is not a class ',st)
+			st:compile()
 		end
 	end
 
@@ -306,8 +313,8 @@ function class:compile(env)
 	end)
 
 	--add new fields.
-	for i,f in ipairs(self.ast.fields) do
-		self:compile_field(f, env)
+	for i,ast in ipairs(self.ast.fields) do
+		self:compile_field(ast, ast.env or env)
 	end
 
 	--METHODS
@@ -334,15 +341,15 @@ function class:compile(env)
 
 	--add new (to-compile) methods and method hooks, in order.
 	for i,ast in ipairs(self.ast.methods) do
-		self:type_method(ast, env)
+		self:type_method(ast, ast.env or env)
 		local m = self.methods[ast.sig]
 		if not m then
-			assert(not ast.hook, 'missing method to override for '..tostring(ast.sig))
+			assert(not ast.hook, 'missing method to override for ',ast.sig)
 			m = {ast = ast, private = ast.private, ismacro = ast.ismacro}
 			self.methods[ast.sig] = m
 		else
-			assert(ast.hook, 'duplicate definition for '..tostring(ast.sig))
-			assert(m.ast or m.vfunc, 'trying to override static method '..tostring(ast.sig))
+			assert(ast.hook, 'duplicate definition for ',ast.sig)
+			assert(m.ast or m.vfunc, 'trying to override static method ',ast.sig)
 			m.inherited = m.vfunc
 		end
 	end
@@ -395,16 +402,16 @@ function class:compile(env)
 		local stub = m.vfunc or m.func
 		if not ast.ismacro then
 			if not ast.hook then
-				local func = self:compile_terra(ast, env)
+				local func = self:compile_terra(ast, ast.env or env)
 				stub:resetdefinition(func)
 			else
-				local func = self:compile_terra_override(ast, env, m.inherited)
+				local func = self:compile_terra_override(ast, ast.env or env, m.inherited or m.vfunc)
 				stub:resetdefinition(func)
 				m.inherited = func
 			end
 		else
 			assert(not ast.hook or ast.hook == 'over')
-			local func = self:compile_macro(ast, env)
+			local func = self:compile_macro(ast, ast.env or env)
 			m.vfunc = func
 			m.func = func
 			self.T.methods[ast.sig[1]] = func
@@ -414,7 +421,7 @@ function class:compile(env)
 	local vtable = constant(`arrayof([&opaque], [self.vtable]))
 	self.compiled = true --can't add more virtual methods from this point on.
 
-	terra self.T:_init()
+	terra self.T:__init_vtable()
 		self.__vtable = vtable
 	end
 
@@ -447,25 +454,52 @@ function class:compile(env)
 	end
 
 	self.T.metamethods.__cast = __cast
+end
 
-	return self.T
+function class.tcompile(T)
+	local self = T.metamethods.class
+	if self.compiled then return end
+	self:compile(self.env)
 end
 
 --language extension ---------------------------------------------------------
 
 local oopslang = {
 	name = 'oopslang';
-	entrypoints = {'class'};
-	keywords = {'before', 'after', 'over'};
+	entrypoints = {'class', 'fn', 'before', 'after', 'over'};
+	keywords = {'nocompile'};
 }
 
 function oopslang:statement(lex)
-	local cls = class()
-	cls:parse(lex)
-	local ctor = function(get_env)
-		return cls:compile(get_env())
+	if lex:matches'class' then
+		local cls = class()
+		local T = cls:parse(lex)
+		local ctor = function(get_env)
+			if cls.nocompile then
+				cls.env = get_env()
+			else
+				cls:compile(get_env())
+			end
+			return T
+		end
+		return ctor, {cls.name} --statement: name = ctor(get_env))
+	elseif lex:matches'fn' or lex:matches'before' or lex:matches'after' or lex:matches'over' then
+		--fn|before|after|over <classname>:<method_def>|<macro_def>
+		local hook = lex:next().type; if hook == 'fn' then hook = nil end
+		--TODO: support a.b:c syntax
+		local clsname = lex:expect(lex.name).value
+		lex:ref(clsname)
+		lex:expect':'
+		local name = lex:expect(lex.name).value
+		local ast = class:parse_method_or_macro_def(lex, name)
+		ast.hook = hook
+		return function(get_env)
+			ast.env = get_env()
+			local T = ast.env[clsname]
+			local self = T.metamethods.class
+			add(self.ast.methods, ast)
+		end
 	end
-	return ctor, {cls.name} --statement: name = ctor(get_env))
 end
 
 oopslang.expression = oopslang.statement
