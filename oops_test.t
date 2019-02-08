@@ -37,70 +37,34 @@ end
 
 do
 	local class C1
-		_x: int --private field
-	end
-	local terra test()
-		var c1: C1; c1:init()
-			c1:set_x(5)    --setter auto-created by using it
-			var x = c1:x() --getter auto-created by using it
-			assert(x == 5)
-	end
-	function test_auto_getters_setters()
-		--C1:printpretty()
-		test()
-	end
-end
-
-do
-	local class C1
-		_x: int --private field
-		f() var x = self:x() end --getter auto-created by using it
-		g() self:set_x(5) end    --setter auto-created by using it
-	end
-	local class C2 : C1
-		--
-	end
-	local terra test()
-		var c2: C2; c2:init()
-		c2:set_x(3)
-		var x = c2:x()
-		assert(x == 3)
-	end
-	function test_getter_setter_inheritance()
-		test()
-	end
-end
-
-do
-	local class C1
-		f(x: int) return x+1 end --static because no one in C1 uses it.
-		h(x: int) return x*x end
+		f(x: int): int return x+1 end
+		h(x: int): int return x*x end
 		--gg() self:f(5) end
 		--^^uncomment so f is virtual so casting a C2->C1 calls C2:f()
 	end
 	local class C2: C1
-		g(x: int) return self:f(x) end --calls C2:f() defined below.
-		over f(x: int) return self:inherited(x)+1 end --defined after g(), but compiled before g().
+		g(x: int): int return self:f(x) end --calls C2:f() defined below.
+		over f(x: int): int return self:inherited(x)+1 end --defined after g(), but compiled before g().
 	end
 	local terra test()
 		var c2: C2; c2:init()
 		var x = c2:g(5)
 		assert(x == 7)
 		assert(c2:h(3) == 9) --inherited h().
-		assert([&C1](&c2):f(5) == 6) --calling C1:f() because it's static.
+		assert([&C1](&c2):f(5) == 7) --calling C2:f() because f is virtual
 	end
-	function test_static_inheritance()
+	function test_inheritance()
 		test()
 	end
 end
 
 do
 	local class C1
-		f(x: int) return x+1 end --virtualized because g() uses it.
-		g(x: int) return self:f(x) end
+		f(x: int): int return x+1 end --virtualized because g() uses it.
+		g(x: int): int return self:f(x) end
 	end
 	local class C2: C1
-		over f(x: int) return self:inherited(x)+1 end --override
+		over f(x: int): int return self:inherited(x)+1 end --override
 	end
 	local terra test()
 		var c2: C2; c2:init()
@@ -157,7 +121,7 @@ do
 		h(x) return `-self:_f(x) end
 	end
 	local class C2: C1
-		over f(x) return `x end
+		over f(x) return `x end --no access to inherited (don't use self:inherited()!)
 		_f(x) return `x end --_f not inherited, so no `over`
 	end
 	local terra test()
@@ -174,13 +138,13 @@ end
 
 do
 	local class C1
-		f(x: int) return x+1 end
-		g(x: int) return self:f(x) end
+		f(x: int): int return x+1 end
+		g(x: int): int return self:f(x) end
 	end
 	local class C2: C1
 		before_hit: bool
 		after_hit: bool
-		before f(x: int) self.before_hit = true end --hook on inherited
+		before f(x: int): int self.before_hit = true end --hook on inherited
 		after  f(x: int) self.after_hit = true; @retval = -x end --hook on overriden
 	end
 	local terra test()
@@ -194,11 +158,35 @@ do
 	end
 end
 
+do
+	local class C1
+		_x: int = 5
+		 y: int = 7
+	end
+
+	local class C2 : C1
+		_x: int = 3
+		 z: int = 9
+	end
+
+	local terra test()
+		var c1: C1; c1:init()
+		var c2: C2; c2:init()
+		assert(c1._x == 5)
+		assert(c1. y == 7)
+		assert(c2._x == 3)
+		assert(c2. z == 9)
+		assert(c2. y == 7)
+	end
+	function test_init_values()
+		test()
+	end
+end
+
 test_private_fields()
-test_auto_getters_setters()
-test_getter_setter_inheritance()
-test_static_inheritance()
+test_inheritance()
 test_method_override()
 test_recursion()
 test_macro_override()
 test_hooks()
+test_init_values()
