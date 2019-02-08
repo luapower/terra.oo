@@ -355,8 +355,8 @@ function class:compile(env)
 	end
 
 	--make stubs for all methods that have a new implementation so that
-	--recursive method references can be resolved by terra.
-	--NOTE: recursive references can also be solved in a __methodmissing
+	--method references can be resolved by terra eagerly.
+	--NOTE: method references can also be solved in a __methodmissing
 	--handler but that would require duplicating the terra logic for chosing
 	--an overloaded definition for a particular combination of arg types.
 	--This method has its own big drawback: return-type inference doesn't work
