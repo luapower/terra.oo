@@ -153,8 +153,7 @@ function test_nocompile()
 	local class C1 nocompile end
 	local class C2 : C1 nocompile end
 
-	over   C2:ff() print'C2:over['; self:inherited() print']' end
-	over   C1:f() print'C1:f()' end
+	over   C2:f() print'C2:over['; self:inherited() print']' end
 	after  C2:f() print'after C2:f()' end
 	before C2:f() print'before C2:f()' end
 
@@ -165,15 +164,19 @@ function test_nocompile()
 
 	terra test()
 		var c2: C2; c2:init()
-		c2:ff()
+		c2:f()
 	end
 	test()
 end
 
-test_private_fields()
-test_inheritance()
-test_recursion()
-test_macro_override()
-test_hooks()
-test_init_values()
---test_nocompile()
+function test_struct_fields()
+	--
+end
+
+--test_private_fields()
+--test_inheritance()
+--test_recursion()
+--test_macro_override()
+--test_hooks()
+--test_init_values()
+test_nocompile()

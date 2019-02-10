@@ -99,13 +99,14 @@ end
 --compiler -------------------------------------------------------------------
 
 function class:compile_field(ast, env)
-	add(self.T.entries, {
+	local field = {
 		name = ast.name,
 		field = self.name..'.'..ast.name,
 		type = ast.type_expr(env),
 		private = ast.private,
 		val = ast.val_expr and ast.val_expr(env),
-	})
+	}
+	add(self.T.entries, field)
 	ast.val_expr = nil
 	ast.type_expr = nil
 end
@@ -306,16 +307,34 @@ function class:compile(env)
 
 	--qualify field names (this is how super's private fields get hidden).
 	self.T.metamethods.__entrymissing = macro(function(name, obj)
-		if name:find('.', 1, true) then
-			error('invalid field '..name)
+		if self.T.methods['get_'..name] then --getters overshadow field access
+			return `obj:['get_'..name]()
 		end
-		return `obj.[self.name..'.'..name]
+		local field = self.fields[name]
+		return field and `obj.[field.field]
+	end)
+
+	self.T.metamethods.__setentry = macro(function(name, obj, rhs)
+		if self.T.methods['set_'..name] then --setters overshadow field assignment
+			return quote obj:['set_'..name](rhs) end
+		end
+		local field = self.fields[name]
+		return field and quote obj.[field.field] = rhs end
 	end)
 
 	--add new fields.
 	for i,ast in ipairs(self.ast.fields) do
 		self:compile_field(ast, ast.env or env)
 	end
+
+	--create field maps to distinguish methods from fields.
+	self.fields = {}
+	for i,entry in ipairs(self.T.entries) do
+		if entry.name then
+			self.fields[entry.name] = entry
+		end
+	end
+	--self.T:complete()
 
 	--METHODS
 
