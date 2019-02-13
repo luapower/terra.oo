@@ -16,14 +16,14 @@ function test_private_fields()
 	end
 
 	local terra test()
-		var c1: C1; c1:init()
+		var c1 = C1(nil)
 			c1._x = 1
 			c1.y = 1
-		var c2: C2; c2:init()
+		var c2 = C2(nil)
 			--c2._x = 1
 			--^^uncomment: invalid field: private, not inherited.
 			c2.y = 1 --public field: inherited.
-		var c3: C3; c3:init()
+		var c3 = C3(nil)
 			c3._x = 1
 			c3.y = 1
 	end
@@ -43,7 +43,7 @@ function test_inheritance()
 		over f(x: int): int return self:inherited(x)+1 end --override
 	end
 	local terra test()
-		var c2: C2; c2:init()
+		var c2 = C2(nil)
 		var x = c2:g(5) --inherited, not overriden. calls overriden C2:f()
 		assert(x == 7)
 		assert(c2:h(3) == 9) --not inherited, not overriden.
@@ -60,7 +60,7 @@ function test_recursion()
 		s(x: int): int return iif(x > 0, self:s(x-1), x) end --self-recursion
 	end
 	local terra test()
-		var c1: C1; c1:init()
+		var c1 = C1(nil)
 		assert(c1:h(5) == -5)
 		assert(c1:s(10) == 0)
 	end
@@ -79,7 +79,7 @@ function test_macros()
 		end --recursive ref.
 	end
 	local terra test()
-		var c1: C1; c1:init()
+		var c1 = C1(nil)
 		assert(c1:g(5) == 5)
 	end
 	test()
@@ -97,7 +97,7 @@ function test_macro_override()
 		_f(x) return `x end --_f not inherited, so no `over`
 	end
 	local terra test()
-		var c2: C2; c2:init()
+		var c2 = C2(nil)
 		assert(c2:g(5) == -5) --macros act like virtual methods sometimes,
 		assert([&C1](&c2):g(5) == -25) --and like static methods other times.
 		assert(c2:h(5) == -5)
@@ -118,7 +118,7 @@ function test_hooks()
 		after  f(x: int) self.after_hit = true; @retval = -x end --hook on overriden
 	end
 	local terra test()
-		var c2: C2; c2:init()
+		var c2 = C2(nil)
 		assert(c2:g(5) == -5)
 		assert(c2.before_hit)
 		assert(c2.after_hit)
@@ -138,8 +138,8 @@ function test_init_values()
 	end
 
 	local terra test()
-		var c1: C1; c1:init()
-		var c2: C2; c2:init()
+		var c1 = C1(nil)
+		var c2 = C2(nil)
 		assert(c1._x == 5)
 		assert(c1. y == 7)
 		assert(c2._x == 3)
@@ -153,30 +153,61 @@ function test_nocompile()
 	local class C1 nocompile end
 	local class C2 : C1 nocompile end
 
-	over   C2:f() print'C2:over['; self:inherited() print']' end
+	over   C2:f() print'over C2:f['; self:inherited() print']' end
 	after  C2:f() print'after C2:f()' end
 	before C2:f() print'before C2:f()' end
 
-	fn C1:f() print'C1:f()' end
-	fn C1:g() print'C1:g()' self:f() end
+	method C1:f() print'C1:f()' end
+	method C1:g() print'C1:g()' self:f() end
 
 	C2:compile() --auto-compiles super
 
 	terra test()
-		var c2: C2; c2:init()
+		var c2 = C2(nil)
 		c2:f()
 	end
 	test()
 end
 
-function test_struct_fields()
-	--
+function test_recursive_fields()
+	local class Node nocompile end
+	field Node.children: arr(Node)
+	Node:compile()
+	assert(sizeof(Node) == 16)
+	terra test()
+		var node = Node(nil)
+		assert(node.children.len == 0)
+	end
+	test()
 end
 
---test_private_fields()
---test_inheritance()
---test_recursion()
---test_macro_override()
---test_hooks()
---test_init_values()
+function test_override_init_free()
+	local class C nocompile
+		x: int
+		a: arr(int)
+	end
+	after C:init() self.x = 12; end
+	before C:free() self.x = 0; end
+	C:compile()
+	terra test()
+		var c = C(nil)
+		assert(c.x == 12)
+		assert(c.a.len == 0)
+		c.a:add(5)
+		assert(c.a.len == 1)
+		c:free()
+		assert(c.x == 0)
+		assert(c.a.len == 0)
+	end
+	test()
+end
+
+test_private_fields()
+test_inheritance()
+test_recursion()
+test_macro_override()
+test_hooks()
+test_init_values()
 test_nocompile()
+test_recursive_fields()
+test_override_init_free()

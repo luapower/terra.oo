@@ -42,7 +42,7 @@ function class:parse(lex)
 			add(self.ast.methods, ast)
 		else
 			local name = lex:expect(lex.name).value
-			if lex:nextif':' then --<field_def>
+			if lex:matches':' or lex:matches'=' then --<field_def>
 				local ast = self:parse_field_def(lex, name)
 				add(self.ast.fields, ast)
 			elseif lex:matches'(' then --<method_def> | <macro_def>
@@ -62,12 +62,13 @@ end
 
 --<field_name>: field_type_expr [=init_const_expr]
 function class:parse_field_def(lex, name)
-	local f = {name = name, private = name:starts'_' or nil}
-	f.type_expr = lex:luaexpr()
+	lex:expect':' --TODO: support type inference from initializer
+	local ast = {name = name, private = name:starts'_' or nil}
+	ast.type_expr = lex:luaexpr()
 	if lex:nextif'=' then
-		f.val_expr = lex:luaexpr()
+		ast.val_expr = lex:luaexpr()
 	end
-	return f
+	return ast
 end
 
 --method: <name>(arg_name: arg_type_expr, ...)[: ret_type_expr]
@@ -98,17 +99,19 @@ end
 
 --compiler -------------------------------------------------------------------
 
+function class:type_field(ast, env)
+	ast.type = ast.type_expr and ast.type_expr(env) or ast.type; ast.type_expr = nil
+	ast.val = ast.val_expr and ast.val_expr(env); ast.val_expr = nil
+end
+
 function class:compile_field(ast, env)
 	local field = {
-		name = ast.name,
 		field = self.name..'.'..ast.name,
-		type = ast.type_expr(env),
+		type = ast.type,
+		name = ast.name,
 		private = ast.private,
-		val = ast.val_expr and ast.val_expr(env),
 	}
 	add(self.T.entries, field)
-	ast.val_expr = nil
-	ast.type_expr = nil
 end
 
 --return a unique identity for each method signature across all methods.
@@ -129,7 +132,7 @@ function class:type_method(ast, env)
 		local arg_types = {}
 		ast.arg_syms = {symbol(&self.T, 'self')}
 		for _,arg in ipairs(ast.args) do
-			local arg_type = arg.type_expr(env); arg.type_expr = nil
+			local arg_type = arg.type_expr and arg.type_expr(env) or arg.type; arg.type_expr = nil
 			add(arg_types, arg_type)
 			add(ast.arg_syms, symbol(arg_type, arg.name))
 		end
@@ -179,7 +182,7 @@ function class:compile_terra(ast, env, extra_arg_syms, inherited_func)
 	end
 	local saved_inherited_func = self.T.methods.inherited
 	self.T.methods.inherited = inherited_func
-	local body_quote = ast.body_stmts(fenv); ast.body_stmts = nil
+	local body_quote = ast.body_stmts(fenv)
 	local func = mkterra(arg_syms, ast.ret_type, body_quote)
 	self.T.methods.inherited = saved_inherited_func
 	return func
@@ -203,7 +206,7 @@ function compile_terra_override:over(ast, env, func)
 	local func_type = func:gettype()
 	local inherited_sym = symbol(&func_type, 'inherited')
 	local over_func = self:compile_terra(ast, env, {inherited_sym}, func)
-	return mkterra(ast.arg_syms, ast.ret_type, quote
+	return mkterra(ast.arg_syms, func_type.returntype, quote
 		var [inherited_sym] = func
 		return over_func([inherited_sym], [ast.arg_syms])
 	end)
@@ -219,19 +222,27 @@ end
 
 function compile_terra_override:after(ast, env, func)
 	local ret_type = func:gettype().returntype
-	--make `retval` available in the hook's environment
-	local retval_sym = symbol(&ret_type, 'retval')
-	local after_func = self:compile_terra(ast, env, {retval_sym}, func)
-	if after_func:gettype().returntype:isunit() then
-		return mkterra(ast.arg_syms, ast.ret_type, quote
-			var retval = func([ast.arg_syms])
-			after_func(&retval, [ast.arg_syms])
-			return retval
+	if ret_type:isunit() then
+		local after_func = self:compile_terra(ast, env, nil, func)
+		return mkterra(ast.arg_syms, ret_type, quote
+			func([ast.arg_syms])
+			after_func([ast.arg_syms])
 		end)
-	else --hook returns a value: return it back.
-		return mkterra(ast.arg_syms, ast.ret_type,
-			`after_func(func([ast.arg_syms]), [ast.arg_syms])
-		)
+	else
+		--make `retval` available in the hook's environment
+		if not ast.ret_type or ast.ret_type:isunit() then
+			local retval_sym = symbol(&ret_type, 'retval')
+			local after_func = self:compile_terra(ast, env, {retval_sym}, func)
+			return mkterra(ast.arg_syms, ret_type, quote
+				var retval = func([ast.arg_syms])
+				after_func(&retval, [ast.arg_syms])
+				return retval
+			end)
+		else --hook returns a value: return it back.
+			return mkterra(ast.arg_syms, ret_type,
+				`after_func(func([ast.arg_syms]), [ast.arg_syms])
+			)
+		end
 	end
 end
 
@@ -255,24 +266,6 @@ function class:add_method(sig, func)
 			error('duplicate definition for macro '..name..'()')
 		end
 	end
-end
-
---implicit cast of &derived to &ancestor. serves two purposes:
---calling ancestor methods with a derived object as self without a cast.
---inheriting ancestor methods into derived types without re-typing them.
-local function __cast(from, to, exp)
-	if from:ispointer() and to:ispointer() then
-		local to_ptr = to
-		local from, to = from.type, to.type
-		while from ~= to and from ~= nil do
-			local mm = from.metamethods
-			from = mm and mm.class and mm.class.super and mm.class.super.T
-		end
-		if from ~= nil then
-			return `[to_ptr](exp)
-		end
-	end
-	error(tostring(from)..' is not a subtype of '..tostring(to))
 end
 
 function class:compile(env)
@@ -310,8 +303,8 @@ function class:compile(env)
 		if self.T.methods['get_'..name] then --getters overshadow field access
 			return `obj:['get_'..name]()
 		end
-		local field = self.fields[name]
-		return field and `obj.[field.field]
+		local field = assert(self.fields[name], 'field not found: ',name)
+		return `obj.[field.field]
 	end)
 
 	self.T.metamethods.__setentry = macro(function(name, obj, rhs)
@@ -322,7 +315,13 @@ function class:compile(env)
 		return field and quote obj.[field.field] = rhs end
 	end)
 
-	--add new fields.
+	--type the new fields, sort them by size for better packing and add them.
+	for i,ast in ipairs(self.ast.fields) do
+		self:type_field(ast, ast.env or env)
+	end
+	sort(self.ast.fields, function(ast1, ast2)
+		return sizeof(ast1.type) > sizeof(ast2.type)
+	end)
 	for i,ast in ipairs(self.ast.fields) do
 		self:compile_field(ast, ast.env or env)
 	end
@@ -334,7 +333,6 @@ function class:compile(env)
 			self.fields[entry.name] = entry
 		end
 	end
-	--self.T:complete()
 
 	--METHODS
 
@@ -350,7 +348,7 @@ function class:compile(env)
 		for sig,m in pairs(self.super.methods) do
 			if not m.private then
 				self.methods[sig] = {
-					func = m.func,
+					func = m.func, --static function or vtable accessor.
 					vfunc = m.vfunc,  --virtual function, this is the impl.
 					ismacro = m.ismacro,
 				}
@@ -358,18 +356,43 @@ function class:compile(env)
 		end
 	end
 
+	--create init() and free() methods (or hooks).
+	local fields = self.ast.fields
+	insert(self.ast.methods, 1, {name = 'init', args = {}, body_stmts = function(env)
+		local self = env.self
+		local t = {}
+		for _,e in ipairs(fields) do
+			if e.val then
+				add(t, quote self.[e.name] = [e.val] end)
+			elseif e.type:isstruct() and e.type.methods.init then
+				add(t, quote self.[e.name]:init() end)
+			end
+		end
+		return t
+	end, hook = self.super and 'after'})
+	insert(self.ast.methods, 1, {name = 'free', args = {}, body_stmts = function(env)
+		local self = env.self
+		local t = {}
+		for _,e in ipairs(fields) do
+			if e.type:isstruct() and e.type.methods.free then
+				add(t, quote self.[e.name]:free() end)
+			end
+		end
+		return t
+	end, hook = self.super and 'before'})
+
 	--add new (to-compile) methods and method hooks, in order.
 	for i,ast in ipairs(self.ast.methods) do
 		self:type_method(ast, ast.env or env)
 		local m = self.methods[ast.sig]
 		if not m then
-			assert(not ast.hook, 'missing method to override for ',ast.sig)
+			assert(not ast.hook, 'missing method to override for ',self.name,':',ast.name)
 			m = {ast = ast, private = ast.private, ismacro = ast.ismacro}
 			self.methods[ast.sig] = m
 		else
-			assert(ast.hook, 'duplicate definition for ',ast.sig)
-			assert(m.ast or m.vfunc, 'trying to override static method ',ast.sig)
-			m.inherited = m.vfunc
+			assert(ast.hook, 'duplicate definition for ',self.name,':',ast.name)
+			assert(m.ast or m.vfunc, 'trying to override static method ',self.name,':',ast.name)
+			m.inherited = m.vfunc or true
 		end
 	end
 
@@ -383,13 +406,13 @@ function class:compile(env)
 	for sig,m in pairs(self.methods) do
 		if not m.ismacro then
 			local stub
-			if m.ast then
+			if m.ast then --new method
 				stub = mkterra(m.ast.arg_syms, m.ast.ret_type)
-			elseif m.inherited then
+			elseif m.inherited then --override
 				stub = mksameterra(m.inherited, nil, self.T)
 			end
 			if stub then
-				if m.inherited then --replace entry in vtable
+				if self.vindex[sig] then --replace entry in vtable
 					m.vfunc = stub
 					self.vtable[self.vindex[sig]] = stub
 				elseif not m.private then --create new entry in vtable
@@ -415,16 +438,21 @@ function class:compile(env)
 		self:add_method(sig, m.func)
 	end
 
-	--compile all methods and method hooks so we can build the vtable.
+	--compile all new methods and method hooks so we can build the vtable.
 	for i,ast in ipairs(self.ast.methods) do
 		local m = self.methods[ast.sig]
 		local stub = m.vfunc or m.func
 		if not ast.ismacro then
 			if not ast.hook then
 				local func = self:compile_terra(ast, ast.env or env)
-				stub:resetdefinition(func)
+				if m.inherited then --hooked on in the same class
+					m.inherited = func
+				else
+					stub:resetdefinition(func)
+				end
 			else
-				local func = self:compile_terra_override(ast, ast.env or env, m.inherited or m.vfunc)
+				local func = self:compile_terra_override(
+					ast, ast.env or env, m.inherited or m.vfunc)
 				stub:resetdefinition(func)
 				m.inherited = func
 			end
@@ -440,38 +468,26 @@ function class:compile(env)
 	local vtable = constant(`arrayof([&opaque], [self.vtable]))
 	self.compiled = true --can't add more virtual methods from this point on.
 
-	terra self.T:__init_vtable()
-		self.__vtable = vtable
-	end
-
-	--init() can't be virtual since it has to initialize the vtable.
-	--that's ok because init() is strictly user API.
-	local entries = self.T.entries
-	local function init_fields(self)
-		local t = {}
-		for i,e in ipairs(entries) do
-			if e.val then
-				add(t, quote self.[e.name] = [e.val] end)
+	--implicit cast of &derived to &ancestor. serves two purposes:
+	--calling ancestor methods with a derived object as self without a cast.
+	--inheriting ancestor methods into derived types without re-typing them.
+	local function __cast(from, to, exp)
+		if from == niltype then
+			return quote var t: self.T; t.__vtable = vtable; t:init() in t end
+		end
+		if from:ispointer() and to:ispointer() then
+			local to_ptr = to
+			local from, to = from.type, to.type
+			while from ~= to and from ~= nil do
+				local mm = from.metamethods
+				from = mm and mm.class and mm.class.super and mm.class.super.T
+			end
+			if from ~= nil then
+				return `[to_ptr](exp)
 			end
 		end
-		return t
+		error(tostring(from)..' is not a subtype of '..tostring(to))
 	end
-	local super_init = self.super and self.super.T.methods.init
-	if super_init then
-		terra self.T:init()
-			super_init(self)
-			self.__vtable = vtable
-			[init_fields(self)]
-			return self
-		end
-	else
-		terra self.T:init()
-			self.__vtable = vtable
-			[init_fields(self)]
-			return self
-		end
-	end
-
 	self.T.metamethods.__cast = __cast
 end
 
@@ -485,7 +501,7 @@ end
 
 local oopslang = {
 	name = 'oopslang';
-	entrypoints = {'class', 'fn', 'before', 'after', 'over'};
+	entrypoints = {'class', 'method', 'field', 'before', 'after', 'over'};
 	keywords = {'nocompile'};
 }
 
@@ -502,21 +518,29 @@ function oopslang:statement(lex)
 			return T
 		end
 		return ctor, {cls.name} --statement: name = ctor(get_env))
-	elseif lex:matches'fn' or lex:matches'before' or lex:matches'after' or lex:matches'over' then
-		--fn|before|after|over <classname>:<method_def>|<macro_def>
-		local hook = lex:next().type; if hook == 'fn' then hook = nil end
+	elseif lex:matches'field' or lex:matches'method'
+		or lex:matches'before' or lex:matches'after' or lex:matches'over'
+	then
+		--field|method|before|after|over <classname>:<field_def>|<method_def>|<macro_def>
+		local keyword = lex:next().type
 		--TODO: support a.b:c syntax
 		local clsname = lex:expect(lex.name).value
 		lex:ref(clsname)
-		lex:expect':'
+		lex:expect(keyword == 'field' and '.' or ':')
 		local name = lex:expect(lex.name).value
-		local ast = class:parse_method_or_macro_def(lex, name)
-		ast.hook = hook
+		local ast = keyword == 'field'
+			and class:parse_field_def(lex, name)
+			 or class:parse_method_or_macro_def(lex, name)
+		ast.hook = keyword ~= 'method' and keyword or nil
 		return function(get_env)
 			ast.env = get_env()
 			local T = ast.env[clsname]
 			local self = T.metamethods.class
-			add(self.ast.methods, ast)
+			if keyword == 'field' then
+				add(self.ast.fields, ast)
+			else
+				add(self.ast.methods, ast)
+			end
 		end
 	end
 end
