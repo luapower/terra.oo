@@ -182,13 +182,12 @@ function test_recursive_fields()
 end
 
 function test_override_init_free()
-	local class C nocompile
+	local class C
 		x: int
-		a: arr(int)
+		a: arr(int) --calls arr's init() and free()
+		after  init() self.x = 12; end --overridable
+		before free() self.x = 0; end --overridable
 	end
-	after C:init() self.x = 12; end
-	before C:free() self.x = 0; end
-	C:compile()
 	terra test()
 		var c = C(nil)
 		assert(c.x == 12)
