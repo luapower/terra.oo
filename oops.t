@@ -24,7 +24,9 @@ function class:parse_class_expr(lex)
 	lex:expect'class'
 	local self = self()
 	self.ast = {fields = {}, methods = {}}
-	self.name = lex:expect(lex.name).value
+	local name_token = lex:expect(lex.name)
+	self.name = name_token.value
+	self.ast.linenumber = name_token.linenumber
 	if lex:nextif':' then
 		self.ast.super_expr = lex:luaexpr()
 	end
@@ -33,17 +35,22 @@ function class:parse_class_expr(lex)
 		if lex:matches'before' or lex:matches'after' or lex:matches'over' then --<hook_def>
 			--before|after|over <method_def>|<macro_def>
 			local hook = lex:next().type
-			local name = lex:expect(lex.name).value
-			local ast = self:parse_method_or_macro_def(lex, name)
+			local name_token = lex:expect(lex.name)
+			local name = name_token.value
+			local ast = self:parse_method_or_macro_def(lex, name, name_token.linenumber)
+			ast.linenumber = name_token.linenumber
 			ast.hook = hook
 			add(self.ast.methods, ast)
 		else
-			local name = lex:expect(lex.name).value
+			local name_token = lex:expect(lex.name)
+			local name = name_token.value
 			if lex:matches':' or lex:matches'=' then --<field_def>
-				local ast = self:parse_field_def(lex, name)
+				local ast = self:parse_field_def(lex, name, name_token.linenumber)
+				ast.linenumber = name_token.linenumber
 				add(self.ast.fields, ast)
 			elseif lex:matches'(' then --<method_def> | <macro_def>
-				local ast = self:parse_method_or_macro_def(lex, name)
+				local ast = self:parse_method_or_macro_def(lex, name, name_token.linenumber)
+				ast.linenumber = name_token.linenumber
 				add(self.ast.methods, ast)
 			else
 				lex:error'field or method definition expected'
@@ -60,11 +67,12 @@ function class:parse_class_expr(lex)
 	return ctor, {self.name} --statement: name = ctor(getenv))
 end
 
---<field_name>: field_type_expr [=init_const_expr]
-function class:parse_field_def(lex, name)
-	lex:expect':' --TODO: support type inference from initializer
-	local ast = {name = name, private = name:starts'_' or nil}
-	ast.type_expr = lex:luaexpr()
+--<field_name>[: field_type_expr] [=init_const_expr]
+function class:parse_field_def(lex, name, linenumber)
+	local ast = {name = name, private = name:starts'_' or nil, linenumber = linenumber}
+	if lex:nextif':' then
+		ast.type_expr = lex:luaexpr()
+	end
 	if lex:nextif'=' then
 		ast.val_expr = lex:luaexpr()
 	end
@@ -73,10 +81,10 @@ end
 
 --method: <name>(arg_name: arg_type_expr, ...)[: ret_type_expr]
 --macro:  <name>(arg_name, ...)
-function class:parse_method_or_macro_def(lex, name, hook)
+function class:parse_method_or_macro_def(lex, name, linenumber)
 	lex:expect'('
 	local ast = {name = name, args = {}, ismacro = false,
-		private = name:starts'_' or nil}
+		private = name:starts'_' or nil, linenumber = linenumber}
 	while not lex:nextif')' do --method args
 		--TODO: support escapes in arg list (splice per Terra semantics)
 		local arg = {}
@@ -104,16 +112,20 @@ function class:parse_standalone_def(lex)
 	local clsname = lex:expect(lex.name).value
 	lex:ref(clsname)
 	lex:expect(keyword == 'field' and '.' or ':')
-	local name = lex:expect(lex.name).value
+	local name_token = lex:expect(lex.name)
+	local name = name_token.value
 	local ast = keyword == 'field'
-		and class:parse_field_def(lex, name)
-		 or class:parse_method_or_macro_def(lex, name)
-	ast.hook = keyword ~= 'method' and keyword or nil
+		and class:parse_field_def(lex, name, name_token.linenumber)
+		 or class:parse_method_or_macro_def(lex, name, name_token.linenumber)
+	ast.hook =
+		   (keyword == 'before'
+		 or keyword == 'after'
+		 or keyword == 'over') and keyword or nil
 	return function(getenv)
 		ast.env = getenv()
 		local T = ast.env[clsname]
 		local self = T.metamethods.class
-		assert(not self.__vtable, 'class ',clsname,' is already compiled')
+		assert(not self.fields, 'class ',clsname,' is already compiled')
 		if keyword == 'field' then
 			add(self.ast.fields, ast)
 		else
@@ -142,7 +154,8 @@ function class:type_method(ast)
 		local arg_types = {}
 		ast.arg_syms = {symbol(&self.T, 'self')}
 		for _,arg in ipairs(ast.args) do
-			local arg_type = arg.type_expr and arg.type_expr(ast.env) or arg.type; arg.type_expr = nil
+			local arg_type = arg.type_expr and arg.type_expr(ast.env) or arg.type
+			arg.type_expr = nil
 			add(arg_types, arg_type)
 			add(ast.arg_syms, symbol(arg_type, arg.name))
 		end
@@ -312,6 +325,8 @@ function class:compile_fields()
 	for i,ast in ipairs(self.ast.fields) do
 		ast.type = ast.type_expr and ast.type_expr(ast.env) or ast.type; ast.type_expr = nil
 		ast.val = ast.val_expr and ast.val_expr(ast.env); ast.val_expr = nil
+		assert(ast.val or ast.type, 'field type or initial value expected')
+		ast.type = ast.type or (`ast.val):gettype()
 	end
 	sort(self.ast.fields, function(ast1, ast2)
 		return sizeof(ast1.type) > sizeof(ast2.type)
@@ -470,6 +485,16 @@ function class:compile_methods()
 		self:add_method(sig, m.func)
 	end
 
+	local function resetdefinition(stub, func, ast)
+		local ok, err = pcall(function()
+			stub:resetdefinition(func)
+		end)
+		if not ok then
+			err = err .. '\n' .. 'at line: ' .. ast.linenumber
+			error(err, 2)
+		end
+	end
+
 	--compile all new methods and method hooks so we can build the vtable.
 	for i,ast in ipairs(self.ast.methods) do
 		local m = self.methods[ast.sig]
@@ -480,12 +505,12 @@ function class:compile_methods()
 				if m.inherited then --hooked on in the same class
 					m.inherited = func
 				else
-					stub:resetdefinition(func)
+					resetdefinition(stub, func, ast)
 				end
 			else
 				local func = self:compile_terra_override(
 					ast, m.inherited or m.vfunc)
-				stub:resetdefinition(func)
+				resetdefinition(stub, func, ast)
 				m.inherited = func
 			end
 		else
